@@ -1,4 +1,4 @@
-FROM php:8.3.14-cli-alpine3.20
+FROM php:8.4.8-cli-alpine3.20
 # Apply Alpine security updates at build time (base images lag behind the patched packages).
 # hadolint ignore=DL3017,DL3018
 RUN apk upgrade --no-cache \
