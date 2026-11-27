@@ -317,6 +317,11 @@ if ($route('POST', '/api/agentfather/sessions')) {
     json_out(session_out(get_session($sid, $u)));
 }
 
+// Re-read a session, e.g. after connecting a model provider: the model choices are recomputed.
+if ($route('GET', '/api/agentfather/sessions/([0-9a-f-]+)')) {
+    json_out(session_out(get_session($m[1], $u)));
+}
+
 if ($route('POST', '/api/agentfather/sessions/([0-9a-f-]+)/messages')) {
     $s = get_session($m[1], $u);
     if ($s['status'] !== 'open') {

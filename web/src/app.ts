@@ -427,6 +427,18 @@ function renderChat(): void {
   if (side.error) html += `<p class="error">${esc(side.error)}</p>`;
   if (s.complete && s.config) html += renderSummary(s.config);
   else if (s.validation_error) html += `<p class="error">The platform rejected this configuration: ${esc(s.validation_error)}</p>`;
+  // Never leave the chat without a way forward: a choice-only question with no choices
+  // (every model provider was disconnected) or a rejected configuration gets recovery actions.
+  const noChoices = !!q && q.kind !== 'text' && !q.other && q.options.length === 0;
+  if (s.status === 'open' && !side.busy && (noChoices || (!s.complete && s.validation_error))) {
+    html += '<div class="recover">';
+    if (noChoices) {
+      html += '<p class="error">No model is available: every model provider is disconnected. '
+        + 'Connect one in <a href="/#providers" target="_blank" rel="noopener">Model providers</a> (opens a new tab), then click Refresh.</p>'
+        + '<button class="btn primary small" id="af-refresh">Refresh</button> ';
+    }
+    html += '<button class="btn small" id="change">Change an answer</button></div>';
+  }
   const body = $('#side-body');
   body.innerHTML = html;
   const showInput = s.status === 'open' && !!q && (q.kind === 'text' || q.other);
@@ -448,6 +460,22 @@ async function sendAnswer(answer: Answer): Promise<void> {
     chat.session = next;
     chat.error = next.error;
     if (!next.error) chat.picked = new Set();
+  } catch (e) {
+    chat.error = (e as Error).message;
+  }
+  chat.busy = false;
+  renderChat();
+}
+
+/** Reloads the session from the API (model choices follow the providers connected now). */
+async function refreshChat(): Promise<void> {
+  if (!side || side.mode !== 'chat' || !side.session || side.busy) return;
+  const chat = side;
+  chat.busy = true;
+  chat.error = null;
+  renderChat();
+  try {
+    chat.session = await api<Session>(`/agentfather/sessions/${(chat.session as Session).id}`);
   } catch (e) {
     chat.error = (e as Error).message;
   }
@@ -564,6 +592,7 @@ $('#side-body').addEventListener('click', (e) => {
   const el = e.target as HTMLElement;
   if (el.id === 'confirm') void confirmConfig();
   if (el.id === 'change') void sendAnswer({action: 'change'});
+  if (el.id === 'af-refresh') void refreshChat();
   if (!side || side.mode !== 'chat') return;
   const chat = side;
   const q = chat.session?.question;

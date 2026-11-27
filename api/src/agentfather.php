@@ -239,6 +239,11 @@ function af_answer(array $state, array $choices, string $text): array
     $answers[$id] = $value;
     if ($id === 'fallback' && !af_applicable('fallback_contact', $answers)) unset($answers['fallback_contact']);
     if ($id === 'access' && !af_applicable('access_ids', $answers)) unset($answers['access_ids']);
+    // Each field has its own limit, but together they must still fit the agent's instructions.
+    $over = mb_strlen(af_instructions($answers)) - AF_INSTRUCTIONS_MAX;
+    if ($over > 0) {
+        return [$state, "Together, your answers are too long for the agent's instructions. Please shorten this answer by at least $over characters.", ''];
+    }
     return [['answers' => $answers, 'asking' => af_next($answers)], null, $shown];
 }
 
@@ -250,31 +255,44 @@ function af_prompt(?string $id): string
 }
 
 /** Turns the answers into the agent configuration (validated afterwards by validate_config). */
+/** Upper bound for the generated instructions (validate_config enforces the same). */
+const AF_INSTRUCTIONS_MAX = 4000;
+
+/**
+ * The agent's instructions text. Works on partial answers too (missing ones count as empty),
+ * so each answer can be checked against the overall limit as soon as it is given.
+ */
+function af_instructions(array $a): string
+{
+    $company = $a['company'] ?? '';
+    $lines = ["You are " . ($a['name'] ?? '') . ", the AI agent of {$company}. Your role: " . ($a['purpose'] ?? '') . '.', ''];
+    $lines[] = 'Tone: ' . strtolower(implode(', ', (array)($a['tone'] ?? []))) . '.';
+    $lines[] = match ($a['language'] ?? '') {
+        "The user's language" => "Language: answer in the language the person writes in.",
+        default => 'Language: ' . ($a['language'] ?? '') . '.',
+    };
+    $lines[] = '';
+    $lines[] = "What you know about {$company}:";
+    $lines[] = $a['knowledge'] ?? '';
+    $lines[] = '';
+    $lines[] = 'Only state facts that are written above. If you are not sure, do not invent an answer.';
+    $lines[] = match ($a['fallback'] ?? '') {
+        'Give a contact to reach a human' => 'When you cannot help, tell the person to contact the team: ' . ($a['fallback_contact'] ?? '') . '.',
+        'Say a team member will follow up' => 'When you cannot help, say that a team member will follow up soon.',
+        default => "When you cannot help, simply say that you don't know.",
+    };
+    return implode("\n", $lines);
+}
+
 function af_build_config(array $a): ?array
 {
     if (af_next($a) !== null) return null;
     $purpose = $a['purpose'];
     $company = $a['company'];
-    $lines = ["You are {$a['name']}, the AI agent of {$company}. Your role: {$purpose}.", ''];
-    $lines[] = 'Tone: ' . strtolower(implode(', ', $a['tone'])) . '.';
-    $lines[] = match ($a['language']) {
-        "The user's language" => "Language: answer in the language the person writes in.",
-        default => 'Language: ' . $a['language'] . '.',
-    };
-    $lines[] = '';
-    $lines[] = "What you know about {$company}:";
-    $lines[] = $a['knowledge'];
-    $lines[] = '';
-    $lines[] = 'Only state facts that are written above. If you are not sure, do not invent an answer.';
-    $lines[] = match ($a['fallback']) {
-        'Give a contact to reach a human' => "When you cannot help, tell the person to contact the team: {$a['fallback_contact']}.",
-        'Say a team member will follow up' => 'When you cannot help, say that a team member will follow up soon.',
-        default => "When you cannot help, simply say that you don't know.",
-    };
     return [
         'name' => $a['name'],
         'job' => mb_substr("$purpose for $company", 0, 160),
-        'instructions' => implode("\n", $lines),
+        'instructions' => af_instructions($a),
         'prohibited_tasks' => $a['prohibited'],
         'channel_type' => 'telegram',
         'runtime' => AF_RUNTIMES[$a['runtime']],
@@ -299,7 +317,7 @@ function validate_config(mixed $d): array
     $job = trim($d['job']);
     if (mb_strlen($job) < 3 || mb_strlen($job) > 160) return [null, 'job: 3-160 characters'];
     $ins = trim($d['instructions']);
-    if (mb_strlen($ins) < 5 || mb_strlen($ins) > 4000) return [null, 'instructions: 5-4000 characters'];
+    if (mb_strlen($ins) < 5 || mb_strlen($ins) > AF_INSTRUCTIONS_MAX) return [null, 'instructions: 5-' . AF_INSTRUCTIONS_MAX . ' characters'];
     if (!is_array($d['prohibited_tasks']) || count($d['prohibited_tasks']) > 20) return [null, 'prohibited_tasks: list of at most 20'];
     $tasks = [];
     foreach ($d['prohibited_tasks'] as $t) {

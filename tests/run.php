@@ -606,5 +606,40 @@ test('agents stuck in starting/stopping without a job are settled from the conta
     assert_eq(['failed', 'false', 'starting'], $updates['a-dead']);
 });
 
+test('AgentFather refuses an answer that would push the instructions over the limit', function () {
+    $answers = complete_answers();
+    unset($answers['knowledge'], $answers['tone'], $answers['language'], $answers['prohibited'], $answers['fallback'],
+          $answers['runtime'], $answers['model'], $answers['channel'], $answers['access']);
+    $answers['purpose'] = str_repeat('p', 160);
+    $answers['company'] = str_repeat('c', 199);
+    $state = ['answers' => $answers, 'asking' => 'knowledge'];
+
+    // 3000 characters is fine on its own, but not with long purpose/company/tones: refused right away.
+    $tooLong = str_repeat('k', 3000);
+    $state1 = $state;
+    $state1['answers']['tone'] = array_map(fn($i) => str_repeat("t$i", 140), range(1, 4));
+    [$same, $err] = af_answer($state1, [], $tooLong);
+    assert_true($err !== null && str_contains($err, 'shorten this answer by at least'), 'expected a length error');
+    assert_eq('knowledge', $same['asking'], 'stays on the same question');
+
+    // Without the long tones the same knowledge fits, and the finished config validates.
+    [$next, $err] = af_answer($state, [], $tooLong);
+    assert_eq(null, $err);
+    $full = $next['answers'] + complete_answers();
+    [$cfg, $verr] = validate_config(af_build_config($full));
+    assert_eq(null, $verr);
+    assert_true(mb_strlen($cfg['instructions']) <= AF_INSTRUCTIONS_MAX);
+});
+
+test('AgentFather offers no model choices when every provider is disconnected', function () {
+    $GLOBALS['af_enabled_providers'] = [];
+    $q = af_question('model');
+    unset($GLOBALS['af_enabled_providers']);
+    // The UI shows its recovery actions for exactly this shape: choice-only and empty.
+    assert_eq([], $q['options']);
+    assert_eq(false, $q['other']);
+    assert_eq('single', $q['kind']);
+});
+
 echo "\nSummary: $passed passed, $failed failed\n";
 exit($failed > 0 ? 1 : 0);
