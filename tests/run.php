@@ -743,5 +743,31 @@ test('an unhealthy agent can still be switched off', function () {
     assert_eq(null, switch_job_type('unhealthy', true));
 });
 
+test('a failed delete switches the agent off and only Delete can retry it', function () {
+    $aid = '11111111-1111-4111-8111-111111111111';
+    $agent = ['id' => $aid, 'tenant_id' => 't', 'state' => 'active', 'enabled' => true, 'secret_ref' => 'sec_' . str_repeat('a', 32)];
+    $set = [];
+    set_pdo(new MockPdo(function (string $sql, array $params) use ($agent, &$set): array {
+        if (str_starts_with($sql, 'SELECT * FROM agents WHERE id=?')) {
+            return ['rows' => [$agent]];
+        }
+        if (str_starts_with($sql, 'UPDATE agents SET')) {
+            $set = $params;
+        }
+        return ['rows' => []];
+    }));
+    set_broker_handler(function (): array {
+        throw new StepError('Docker cleanup DELETE /volumes/af-data-x failed: volume in use', 500);
+    });
+    run_job(['id' => '22222222-2222-4222-8222-222222222222', 'agent_id' => $aid, 'type' => 'delete']);
+    set_broker_handler(null);
+    // UPDATE agents SET state=?, enabled=?, state_reason=? WHERE id=?
+    assert_eq('delete_failed', $set[0]);
+    assert_eq('false', $set[1], 'switched off');
+    assert_true(str_starts_with($set[2], 'Delete failed:'));
+    assert_throws(HttpError::class, fn() => switch_job_type('delete_failed', false), 409);
+    assert_throws(HttpError::class, fn() => switch_job_type('delete_failed', true), 409);
+});
+
 echo "\nSummary: $passed passed, $failed failed\n";
 exit($failed > 0 ? 1 : 0);

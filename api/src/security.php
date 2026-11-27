@@ -212,6 +212,7 @@ function switch_job_type(string $state, bool $on): ?string
         'failed' => $on ? 'create' : null,
         'active', 'unhealthy' => $on ? null : 'disable',
         'starting', 'stopping' => api_fail(409, 'A change is already in progress for this agent'),
+        'delete_failed' => api_fail(409, 'Deleting this agent failed. Click Delete to try again.'),
         default => api_fail(409, 'This agent cannot be switched right now'),
     };
 }

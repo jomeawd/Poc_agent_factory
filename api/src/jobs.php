@@ -277,7 +277,9 @@ function run_job(array $job): void
                 'state_reason' => "$reason (step: $failedStep)",
             ]);
         } elseif ($job['type'] === 'delete') {
-            set_agent($aid, ['state' => 'failed', 'state_reason' => "Delete failed: $reason"]);
+            // Its own state, switched off: the only way forward is to retry Delete (the On/Off
+            // switch is locked), not to queue an enable/disable on an agent being removed.
+            set_agent($aid, ['state' => 'delete_failed', 'enabled' => false, 'state_reason' => "Delete failed: $reason"]);
         } else {
             set_agent($aid, ['state' => 'failed', 'state_reason' => $reason]);
         }
