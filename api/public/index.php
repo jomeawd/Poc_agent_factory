@@ -287,17 +287,7 @@ if ($route('POST', '/api/agents/([0-9a-f-]+)/switch')) {
     if (!is_bool($b['enabled'] ?? null)) {
         fail(422, 'Invalid request: enabled');
     }
-    $on = $b['enabled'];
-    $type = $on ? ($a['state'] === 'failed' ? 'create' : 'enable') : 'disable';
-    if (enqueue($a, $type) === null) {
-        fail(409, 'A change is already in progress for this agent');
-    }
-    q('UPDATE agents SET enabled=?, state=? WHERE id=? AND tenant_id=?', $on, $on ? 'starting' : 'stopping', $a['id'], $u['tenant_id']);
-    event($a['tenant_id'], $a['id'], $on ? 'switch_on' : 'switch_off', 'requested');
-    json_out(public_agent(
-        q1('SELECT * FROM agents WHERE id=? AND tenant_id=?', $a['id'], $u['tenant_id']),
-        active_job($a['id'], $u['tenant_id'])
-    ));
+    json_out(switch_agent($a['id'], $u, $b['enabled']));
 }
 
 if ($route('DELETE', '/api/agents/([0-9a-f-]+)')) {

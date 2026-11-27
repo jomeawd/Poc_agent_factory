@@ -492,5 +492,89 @@ test('broker pulls a missing pinned image once and never pulls an existing one',
     assert_eq(1, count($calls));
 });
 
+test('switch only queues valid transitions and is a no-op when already there', function () {
+    assert_eq('enable', switch_job_type('inactive', true));
+    assert_eq('create', switch_job_type('failed', true));
+    assert_eq('disable', switch_job_type('active', false));
+    assert_eq(null, switch_job_type('active', true));
+    assert_eq(null, switch_job_type('inactive', false));
+    assert_eq(null, switch_job_type('failed', false));
+    assert_throws(HttpError::class, fn() => switch_job_type('starting', false), 409);
+    assert_throws(HttpError::class, fn() => switch_job_type('stopping', true), 409);
+});
+
+test('switch queues the job and moves the agent in one transaction', function () {
+    $aid = '11111111-1111-4111-8111-111111111111';
+    $u = ['id' => 'u1', 'tenant_id' => 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'];
+    $agent = [
+        'id' => $aid, 'tenant_id' => $u['tenant_id'], 'state' => 'active', 'enabled' => true, 'name' => 'Nova', 'job' => 'x',
+        'channel_type' => 'telegram', 'channel_account' => '@nova', 'runtime' => 'openclaw', 'model' => 'm',
+        'state_reason' => null, 'last_message_at' => null, 'created_at' => '2026-01-01T00:00:00Z', 'allowed_users' => '[]',
+    ];
+    $log = [];
+    $dupJob = false;
+    $pdo = new MockPdo(function (string $sql, array $params) use (&$agent, &$log, &$dupJob, &$pdo): array {
+        if (str_contains($sql, 'FROM agents WHERE id=?')) {
+            $log[] = str_contains($sql, 'FOR UPDATE') ? 'lock' : 'read';
+            return ['rows' => [$agent]];
+        }
+        if (str_starts_with($sql, 'INSERT INTO jobs')) {
+            if ($dupJob) {
+                throw make_pdo_exception('23505', 'duplicate key value violates unique constraint "one_active_job_per_agent"');
+            }
+            $log[] = 'job:' . $params[3] . ($pdo->inTransaction() ? ' (tx)' : '');
+            return ['rows' => []];
+        }
+        if (str_starts_with($sql, 'UPDATE agents SET enabled=?')) {
+            $log[] = 'agent:' . $params[1] . ($pdo->inTransaction() ? ' (tx)' : '');
+            $agent['state'] = $params[1];
+        }
+        return ['rows' => []];
+    });
+    set_pdo($pdo);
+
+    $out = switch_agent($aid, $u, false);
+    assert_eq(['lock', 'job:disable (tx)', 'agent:stopping (tx)', 'read'], $log);
+    assert_eq(1, $pdo->commits);
+    assert_eq('stopping', $out['state']);
+
+    // Already active and switched on: nothing queued, nothing changed.
+    $agent['state'] = 'active';
+    $log = [];
+    switch_agent($aid, $u, true);
+    assert_eq(['lock', 'read'], $log);
+
+    // Another job slipped in: 409 and the transaction is rolled back (agent not moved).
+    $dupJob = true;
+    assert_throws(HttpError::class, fn() => switch_agent($aid, $u, false), 409);
+    assert_eq(1, $pdo->rollbacks);
+    assert_eq('active', $agent['state']);
+});
+
+test('agents stuck in starting/stopping without a job are settled from the container', function () {
+    $rows = [
+        ['id' => 'a-run', 'tenant_id' => 't', 'state' => 'starting'],
+        ['id' => 'a-stop', 'tenant_id' => 't', 'state' => 'stopping'],
+        ['id' => 'a-dead', 'tenant_id' => 't', 'state' => 'starting'],
+    ];
+    $updates = [];
+    set_pdo(new MockPdo(function (string $sql, array $params) use ($rows, &$updates): array {
+        if (str_starts_with($sql, "SELECT * FROM agents WHERE state IN ('starting','stopping')")) {
+            return ['rows' => $rows];
+        }
+        if (str_starts_with($sql, 'UPDATE agents SET state=?')) {
+            $updates[$params[3]] = [$params[0], $params[1], $params[4]];
+            return ['rows' => [['id' => $params[3]]]];
+        }
+        return ['rows' => []];
+    }));
+    set_broker_handler(fn(string $m, string $path) => ['running' => $path === '/agents/a-run/status']);
+    assert_eq(3, settle_stuck_agents());
+    set_broker_handler(null);
+    assert_eq(['active', 'true', 'starting'], $updates['a-run']);
+    assert_eq(['inactive', 'false', 'stopping'], $updates['a-stop']);
+    assert_eq(['failed', 'false', 'starting'], $updates['a-dead']);
+});
+
 echo "\nSummary: $passed passed, $failed failed\n";
 exit($failed > 0 ? 1 : 0);

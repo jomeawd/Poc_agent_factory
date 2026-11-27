@@ -185,6 +185,55 @@ function public_agent(array $a, ?array $job = null): array
 }
 
 /**
+ * Which job the On/Off switch should queue for an agent in $state.
+ * Returns null when the agent is already where the switch asks (nothing to do).
+ * Refuses (409) while a change is under way or after a failed deletion.
+ */
+function switch_job_type(string $state, bool $on): ?string
+{
+    return match ($state) {
+        'inactive' => $on ? 'enable' : null,
+        'failed' => $on ? 'create' : null,
+        'active' => $on ? null : 'disable',
+        'starting', 'stopping' => api_fail(409, 'A change is already in progress for this agent'),
+        default => api_fail(409, 'This agent cannot be switched right now'),
+    };
+}
+
+/**
+ * On/Off switch. Locks the agent row, checks the transition, then queues the job and moves the
+ * agent to starting/stopping in ONE transaction: the worker cannot see the job before the agent
+ * row says starting/stopping, so it can never finish first and have its result overwritten.
+ */
+function switch_agent(string $agentId, array $u, bool $on): array
+{
+    $pdo = pdo();
+    $pdo->beginTransaction();
+    try {
+        $a = q1("SELECT * FROM agents WHERE id=? AND tenant_id=? AND state <> 'deleted' FOR UPDATE", $agentId, $u['tenant_id'])
+            ?? api_fail(404, 'Agent not found');
+        $type = switch_job_type($a['state'], $on);
+        if ($type !== null) {
+            if (enqueue($a, $type) === null) {
+                api_fail(409, 'A change is already in progress for this agent');
+            }
+            q('UPDATE agents SET enabled=?, state=? WHERE id=? AND tenant_id=?', $on, $on ? 'starting' : 'stopping', $a['id'], $u['tenant_id']);
+            event($a['tenant_id'], $a['id'], $on ? 'switch_on' : 'switch_off', 'requested');
+        }
+        $pdo->commit();
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        throw $e;
+    }
+    return public_agent(
+        q1('SELECT * FROM agents WHERE id=? AND tenant_id=?', $agentId, $u['tenant_id']),
+        active_job($agentId, $u['tenant_id'])
+    );
+}
+
+/**
  * Atomically confirms an AgentFather session:
  * locks session row, validates config/token, stores secret in broker, creates agent + job in DB transaction,
  * and deletes the stored secret via compensation if DB commit or enqueue fails.

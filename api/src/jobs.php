@@ -268,9 +268,51 @@ function claim_job(): ?array
                  FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING *");
 }
 
+/**
+ * Unsticks agents left in starting/stopping with no job behind them (written by an older
+ * version, or by a crash between two statements): the UI locks the switch in those states.
+ * The container decides: running -> active, otherwise inactive (stopping) or failed (starting).
+ * Guarded on the state read, so a switch made in the meantime is never overwritten.
+ */
+function settle_stuck_agents(): int
+{
+    $rows = q("SELECT * FROM agents WHERE state IN ('starting','stopping') AND NOT EXISTS (
+                 SELECT 1 FROM jobs j WHERE j.agent_id=agents.id AND j.state IN ('queued','running','rolling_back'))");
+    $settled = 0;
+    foreach ($rows as $a) {
+        try {
+            $running = (bool)(broker('GET', "/agents/{$a['id']}/status")['running'] ?? false);
+        } catch (StepError) {
+            continue;
+        }
+        [$state, $enabled, $reason] = match (true) {
+            $running => ['active', true, null],
+            $a['state'] === 'stopping' => ['inactive', false, null],
+            default => ['failed', false, 'Start was interrupted; switch on to retry'],
+        };
+        $done = q(
+            "UPDATE agents SET state=?, enabled=?, state_reason=? WHERE id=? AND state=? AND NOT EXISTS (
+               SELECT 1 FROM jobs j WHERE j.agent_id=agents.id AND j.state IN ('queued','running','rolling_back'))
+             RETURNING id",
+            $state,
+            $enabled,
+            $reason,
+            $a['id'],
+            $a['state']
+        );
+        if ($done) {
+            event($a['tenant_id'], $a['id'], 'state_settled', $state, "was {$a['state']} with no job");
+            $settled++;
+        }
+    }
+    return $settled;
+}
+
 /** Make the list reflect where containers really are, and record message activity. */
 function reconcile(): void
 {
+    settle_stuck_agents();
+
     $rows = q("SELECT * FROM agents WHERE state IN ('active','inactive') AND NOT EXISTS (
                  SELECT 1 FROM jobs j WHERE j.agent_id=agents.id AND j.state IN ('queued','running','rolling_back'))");
     foreach ($rows as $a) {
