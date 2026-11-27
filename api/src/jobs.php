@@ -332,29 +332,69 @@ function settle_stuck_agents(): int
     return $settled;
 }
 
-/** Make the list reflect where containers really are, and record message activity. */
+/** Consecutive unhealthy reconcile passes (5 s apart) before an agent is shown as Unhealthy. */
+const UNHEALTHY_CHECKS = 3;
+
+/**
+ * Updates an agent only if it is still in the state read and no job took it over in the meantime,
+ * so the reconciler never overwrites a switch the user just made.
+ */
+function transition_agent(array $a, array $fields): bool
+{
+    $cols = implode(', ', array_map(fn($k) => "$k=?", array_keys($fields)));
+    return q(
+        "UPDATE agents SET $cols WHERE id=? AND state=? AND NOT EXISTS (
+           SELECT 1 FROM jobs j WHERE j.agent_id=agents.id AND j.state IN ('queued','running','rolling_back'))
+         RETURNING id",
+        ...[...array_values($fields), $a['id'], $a['state']]
+    ) !== [];
+}
+
+/**
+ * Makes the list reflect where containers really are, and records message activity.
+ * Only agents that should be running are polled (stopped ones cannot drift or receive messages).
+ * Health: a running container whose health check keeps failing (e.g. lost Telegram) is shown
+ * as Unhealthy after UNHEALTHY_CHECKS passes, and back to Active once healthy again.
+ */
 function reconcile(): void
 {
+    static $unhealthyStreak = [];
     settle_stuck_agents();
-
-    $rows = q("SELECT * FROM agents WHERE state IN ('active','inactive') AND NOT EXISTS (
+    $rows = q("SELECT * FROM agents WHERE state IN ('active','unhealthy') AND NOT EXISTS (
                  SELECT 1 FROM jobs j WHERE j.agent_id=agents.id AND j.state IN ('queued','running','rolling_back'))");
     foreach ($rows as $a) {
+        $id = $a['id'];
         try {
-            $s = broker('GET', "/agents/{$a['id']}/status");
+            $s = broker('GET', "/agents/$id/status");
         } catch (StepError) {
             continue;
         }
-        if ($a['state'] === 'active' && !$s['running']) {
-            set_agent($a['id'], ['state' => 'failed', 'enabled' => false, 'state_reason' => 'Container stopped unexpectedly']);
-            event($a['tenant_id'], $a['id'], 'container_lost', 'failed');
+        if (!$s['running']) {
+            unset($unhealthyStreak[$id]);
+            if (transition_agent($a, ['state' => 'failed', 'enabled' => false, 'state_reason' => 'Container stopped unexpectedly'])) {
+                event($a['tenant_id'], $id, 'container_lost', 'failed');
+            }
+            continue;
+        }
+        if (($s['health'] ?? null) === 'unhealthy') {
+            $unhealthyStreak[$id] = ($unhealthyStreak[$id] ?? 0) + 1;
+            if ($a['state'] === 'active' && $unhealthyStreak[$id] >= UNHEALTHY_CHECKS
+                && transition_agent($a, ['state' => 'unhealthy', 'state_reason' => 'Health check failing (for example, Telegram or the model is unreachable)'])) {
+                event($a['tenant_id'], $id, 'health_degraded', 'unhealthy');
+            }
+        } else {
+            unset($unhealthyStreak[$id]);
+            if ($a['state'] === 'unhealthy' && ($s['health'] ?? null) === 'healthy'
+                && transition_agent($a, ['state' => 'active', 'state_reason' => null])) {
+                event($a['tenant_id'], $id, 'health_recovered', 'active');
+            }
         }
         if (!empty($s['last_activity'])) {
             $ts = (float)$s['last_activity'];
             $prev = $a['last_message_at'] ? (float)(new DateTimeImmutable($a['last_message_at']))->format('U.u') : 0.0;
             if ($ts > $prev + 0.001) {
-                q('UPDATE agents SET last_message_at=to_timestamp(?) WHERE id=?', $ts, $a['id']);
-                event($a['tenant_id'], $a['id'], 'message_handled', 'completed', null, null, null, $a['channel_type']);
+                q('UPDATE agents SET last_message_at=to_timestamp(?) WHERE id=?', $ts, $id);
+                event($a['tenant_id'], $id, 'message_handled', 'completed', null, null, null, $a['channel_type']);
             }
         }
     }

@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS agents (
   instructions text NOT NULL, prohibited_tasks jsonb NOT NULL DEFAULT '[]',
   channel_type text NOT NULL CHECK (channel_type IN ('telegram','whatsapp')),
   channel_account text, secret_ref text, enabled boolean NOT NULL DEFAULT true,
-  state text NOT NULL CHECK (state IN ('starting','active','stopping','inactive','failed','deleted')),
+  state text NOT NULL CHECK (state IN ('starting','active','unhealthy','stopping','inactive','failed','deleted')),
   state_reason text, container_id text, last_message_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS agentfather_sessions (
@@ -42,6 +42,15 @@ ALTER TABLE agents ADD COLUMN IF NOT EXISTS model text NOT NULL DEFAULT 'claude-
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS allowed_users jsonb NOT NULL DEFAULT '[]';
 -- Job lease for worker restart recovery.
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS lease_expires_at timestamptz;
+-- 'unhealthy': container running but its health check fails. Widen older databases once.
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'agents_state_check'
+                 AND pg_get_constraintdef(oid) LIKE '%unhealthy%') THEN
+    ALTER TABLE agents DROP CONSTRAINT IF EXISTS agents_state_check;
+    ALTER TABLE agents ADD CONSTRAINT agents_state_check
+      CHECK (state IN ('starting','active','unhealthy','stopping','inactive','failed','deleted'));
+  END IF;
+END $$;
 -- At most one in-flight job per agent: the DB enforces it, not the UI.
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_job_per_agent ON jobs(agent_id)
   WHERE state IN ('queued','running','rolling_back');

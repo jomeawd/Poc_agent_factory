@@ -701,5 +701,47 @@ test('Off/On and re-creating an agent that ran keep its data; a failed first cre
     set_broker_handler(null);
 });
 
+test('reconcile surfaces unhealthy agents after a grace period and only polls running ones', function () {
+    $agent = ['id' => 'health-1', 'tenant_id' => 't', 'state' => 'active', 'last_message_at' => null, 'channel_type' => 'telegram'];
+    $polledSql = null;
+    $events = [];
+    set_pdo(new MockPdo(function (string $sql, array $params) use (&$agent, &$polledSql, &$events): array {
+        if (str_starts_with($sql, "SELECT * FROM agents WHERE state IN ('active','unhealthy')")) {
+            $polledSql = $sql;
+            return ['rows' => [$agent]];
+        }
+        if (str_starts_with($sql, 'UPDATE agents SET state=?')) {     // guarded transition
+            $agent['state'] = $params[0];
+            return ['rows' => [['id' => $agent['id']]]];
+        }
+        if (str_starts_with($sql, 'INSERT INTO events')) {
+            $events[] = $params[3];
+        }
+        return ['rows' => []];
+    }));
+    $health = 'unhealthy';
+    set_broker_handler(function () use (&$health): array {
+        return ['running' => true, 'health' => $health, 'last_activity' => null];
+    });
+
+    reconcile();
+    reconcile();
+    assert_eq('active', $agent['state'], 'a short blip is not reported');
+    reconcile();
+    assert_eq('unhealthy', $agent['state'], 'reported after UNHEALTHY_CHECKS passes');
+    $health = 'healthy';
+    reconcile();
+    assert_eq('active', $agent['state'], 'back to active once healthy');
+    assert_eq(['health_degraded', 'health_recovered'], $events);
+    // Inactive agents are no longer polled.
+    assert_true(!str_contains((string)$polledSql, "'inactive'"), 'inactive agents must not be polled');
+    set_broker_handler(null);
+});
+
+test('an unhealthy agent can still be switched off', function () {
+    assert_eq('disable', switch_job_type('unhealthy', false));
+    assert_eq(null, switch_job_type('unhealthy', true));
+});
+
 echo "\nSummary: $passed passed, $failed failed\n";
 exit($failed > 0 ? 1 : 0);

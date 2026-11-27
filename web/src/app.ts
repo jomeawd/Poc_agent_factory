@@ -1,6 +1,6 @@
 // Agents page: list + switch + delete + AgentFather side panel + deploy steps + event log.
 
-type AgentState = 'starting' | 'active' | 'stopping' | 'inactive' | 'failed';
+type AgentState = 'starting' | 'active' | 'unhealthy' | 'stopping' | 'inactive' | 'failed';
 type JobType = 'create' | 'enable' | 'disable' | 'delete';
 type Runtime = 'openclaw' | 'hermes';
 
@@ -284,7 +284,7 @@ async function api<T>(path: string, opts: {method?: string; body?: unknown} = {}
 }
 
 const STATE_LABEL: Record<AgentState, string> = {
-  starting: 'Starting', active: 'Active', stopping: 'Stopping', inactive: 'Inactive', failed: 'Failed',
+  starting: 'Starting', active: 'Active', unhealthy: 'Unhealthy', stopping: 'Stopping', inactive: 'Inactive', failed: 'Failed',
 };
 const STEP_LABEL: Record<string, string> = {
   validate_config: 'Validate configuration',
@@ -319,7 +319,7 @@ function renderAgents(): void {
           <div class="a-meta">${RUNTIME_LABEL[a.runtime] ?? a.runtime} · ${esc(MODEL_LABEL[a.model] ?? a.model)}${a.restricted ? ' · 🔒 allowlist' : ''}</div></td>
       <td class="chan">${esc(a.channel_account || '—')}<small>${a.channel_type === 'telegram' ? 'Telegram' : 'WhatsApp'}</small></td>
       <td><span class="badge ${a.state}">${STATE_LABEL[a.state] ?? a.state}</span>
-          ${a.state === 'failed' && a.state_reason ? `<div class="reason">${esc(a.state_reason)}</div>` : ''}</td>
+          ${(a.state === 'failed' || a.state === 'unhealthy') && a.state_reason ? `<div class="reason">${esc(a.state_reason)}</div>` : ''}</td>
       <td>${timeAgo(a.last_message_at)}</td>
       <td><button class="switch" role="switch" aria-label="Turn ${esc(a.name)} ${a.enabled ? 'off' : 'on'}"
            aria-checked="${a.enabled}" data-act="switch" ${locked ? 'disabled' : ''}></button></td>
@@ -523,6 +523,7 @@ function renderDeploy(a: AgentDetail): string {
   html += '</ol>';
   if (a.state === 'active') html += `<p>✅ <b>${esc(a.name)}</b> is Active.</p>` + renderQr(a);
   if (a.state === 'failed') html += `<p class="error">Failed: ${esc(a.state_reason ?? 'unknown reason')}</p>`;
+  if (a.state === 'unhealthy') html += `<p class="error">Unhealthy: ${esc(a.state_reason ?? 'health check failing')}. It recovers on its own when the check passes again; switch it off and on to restart it.</p>`;
   return html;
 }
 

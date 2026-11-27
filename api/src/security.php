@@ -210,7 +210,7 @@ function switch_job_type(string $state, bool $on): ?string
     return match ($state) {
         'inactive' => $on ? 'enable' : null,
         'failed' => $on ? 'create' : null,
-        'active' => $on ? null : 'disable',
+        'active', 'unhealthy' => $on ? null : 'disable',
         'starting', 'stopping' => api_fail(409, 'A change is already in progress for this agent'),
         default => api_fail(409, 'This agent cannot be switched right now'),
     };
