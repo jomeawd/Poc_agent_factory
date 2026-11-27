@@ -49,6 +49,8 @@ TOKEN_FROM_LOGIN=$(json "d.get('csrf_token','')")
 
 echo "== CSRF and CORS"
 req POST /api/agentfather/sessions ''; check "state change without CSRF token rejected (403)" '[ "$code" = 403 ]'
+req POST /api/logout ''; check "logout without CSRF token rejected (403)" '[ "$code" = 403 ]'
+req GET /api/me; check "session survives a forged logout" '[ "$code" = 200 ]'
 CSRF="$TOKEN_FROM_LOGIN"
 req POST /api/agentfather/sessions '' -H 'Origin: https://evil.example'; check "cross-origin state change rejected (403)" '[ "$code" = 403 ]'
 

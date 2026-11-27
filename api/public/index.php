@@ -175,6 +175,16 @@ if ($route('POST', '/api/login')) {
 }
 
 if ($route('POST', '/api/logout')) {
+    // A signed-in user can only be logged out with their CSRF token (no cross-site logout).
+    // Without a valid session there is nothing to protect, so the cookie is simply cleared.
+    try {
+        $session = current_user();
+    } catch (HttpError) {
+        $session = null;
+    }
+    if ($session !== null && !verify_csrf_token($session['csrf_token'], $_SERVER['HTTP_X_CSRF_TOKEN'] ?? null)) {
+        fail(403, 'Invalid or missing CSRF token');
+    }
     setcookie(COOKIE, '', cookie_options(1, $secureCookie));
     json_out(['ok' => true]);
 }
