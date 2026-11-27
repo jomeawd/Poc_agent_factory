@@ -187,6 +187,36 @@ test('login rate limiting locks out after 5 failures', function () {
     assert_throws(HttpError::class, fn() => check_login_rate_limit('owner@acme.test', '127.0.0.1'), 429);
 });
 
+test('client IP cannot be spoofed through X-Forwarded-For', function () {
+    $peer = ['REMOTE_ADDR' => '172.20.0.9'];
+    // Client-forged entries on the left are ignored; the proxy's (rightmost) entry wins.
+    assert_eq('203.0.113.7', client_ip($peer + ['HTTP_X_FORWARDED_FOR' => '198.51.100.1, 203.0.113.7'], true));
+    assert_eq('203.0.113.7', client_ip($peer + ['HTTP_X_FORWARDED_FOR' => '203.0.113.7'], true));
+    // Garbage falls back to the socket peer, and the header is ignored when no proxy is trusted.
+    assert_eq('172.20.0.9', client_ip($peer + ['HTTP_X_FORWARDED_FOR' => 'x" OR 1=1'], true));
+    assert_eq('172.20.0.9', client_ip($peer + ['HTTP_X_FORWARDED_FOR' => '198.51.100.1'], false));
+});
+
+test('login is capped per account across IPs and old attempts are pruned', function () {
+    $recentFailures = 0;
+    $pruned = 0;
+    set_pdo(new MockPdo(function (string $sql) use (&$recentFailures, &$pruned): array {
+        if (str_starts_with($sql, 'SELECT COALESCE(SUM(failures)')) {
+            return ['rows' => [['n' => $recentFailures]]];
+        }
+        if (str_starts_with($sql, 'DELETE FROM login_attempts WHERE updated_at')) {
+            $pruned++;
+        }
+        return ['rows' => []];
+    }));
+    $recentFailures = LOGIN_ACCOUNT_MAX_FAILURES - 1;
+    check_login_rate_limit('owner@acme.test', '198.51.100.99'); // fresh IP, under the account cap
+    $recentFailures = LOGIN_ACCOUNT_MAX_FAILURES;
+    assert_throws(HttpError::class, fn() => check_login_rate_limit('owner@acme.test', '198.51.100.100'), 429);
+    record_login_failure('owner@acme.test', '198.51.100.100');
+    assert_eq(1, $pruned);
+});
+
 // ---------------------------------------------------------------- 4. Manifest, secrets, and redaction
 test('manifest building, broker validation, and secret atomic storage', function () {
     $aid = '11111111-1111-4111-8111-111111111111';

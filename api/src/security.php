@@ -106,9 +106,12 @@ function client_ip(?array $server = null, ?bool $trustProxy = null): string
     $server ??= $_SERVER;
     $trustProxy ??= strtolower(trim((string)getenv('TRUST_PROXY'))) === 'true';
     if ($trustProxy && !empty($server['HTTP_X_FORWARDED_FOR'])) {
+        // Only the RIGHTMOST entry was written by our proxy (Caddy sets it to the peer address);
+        // anything to its left came from the client and can be forged.
         $parts = array_map('trim', explode(',', (string)$server['HTTP_X_FORWARDED_FOR']));
-        if ($parts[0] !== '') {
-            return substr($parts[0], 0, 64);
+        $last = end($parts);
+        if (filter_var($last, FILTER_VALIDATE_IP) !== false) {
+            return $last;
         }
     }
     return substr((string)($server['REMOTE_ADDR'] ?? '0.0.0.0'), 0, 64);
@@ -123,7 +126,18 @@ function check_login_rate_limit(string $email, string $ip): void
             api_fail(429, 'Too many failed login attempts. Try again later.');
         }
     }
+    // Account-wide cap, whatever the IP: spreading guesses over many addresses does not help.
+    $recent = q1(
+        "SELECT COALESCE(SUM(failures), 0) AS n FROM login_attempts WHERE email=? AND updated_at > now() - interval '15 minutes'",
+        $email
+    );
+    if ((int)($recent['n'] ?? 0) >= LOGIN_ACCOUNT_MAX_FAILURES) {
+        api_fail(429, 'Too many failed login attempts. Try again later.');
+    }
 }
+
+/** Failures allowed per account in 15 minutes across all IPs (per-IP limit stays 5). */
+const LOGIN_ACCOUNT_MAX_FAILURES = 20;
 
 function record_login_failure(string $email, string $ip, int $maxFailures = 5, int $lockSeconds = 300): void
 {
@@ -134,6 +148,8 @@ function record_login_failure(string $email, string $ip, int $maxFailures = 5, i
         $failures = ($updated !== false && (time() - $updated) < 900) ? ((int)$row['failures'] + 1) : 1;
     }
     $lockedUntil = $failures >= $maxFailures ? gmdate('Y-m-d H:i:sP', time() + $lockSeconds) : null;
+    // Keep the table small: rows older than a day no longer count for anything.
+    q("DELETE FROM login_attempts WHERE updated_at < now() - interval '1 day' AND (locked_until IS NULL OR locked_until < now())");
     q(
         'INSERT INTO login_attempts(email, ip, failures, locked_until, updated_at) VALUES (?,?,?,?,now())
          ON CONFLICT (email, ip) DO UPDATE SET failures=EXCLUDED.failures, locked_until=EXCLUDED.locked_until, updated_at=now()',
