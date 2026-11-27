@@ -137,8 +137,10 @@ if ($route('POST', '/agents/([0-9a-f-]+)/create')) {
     }
 
     // Idempotent: whatever a previous (possibly interrupted) attempt left is removed,
-    // so a retry can never produce a second container for this agent.
-    remove_all($id);
+    // so a retry can never produce a second container for this agent. The data volume is
+    // reused as is (creating an existing volume is a no-op in Docker).
+    $keepData = ($_GET['keep_data'] ?? '') === 'true';
+    remove_all($id, keepVolume: true);
 
     try {
         docker_ok('POST', '/networks/create', ['Name' => $nname, 'Driver' => 'bridge', 'Internal' => true, 'Labels' => $labels + ['af.egress' => $egress]]);
@@ -183,7 +185,7 @@ if ($route('POST', '/agents/([0-9a-f-]+)/create')) {
         out(['container_id' => $c['Id']]);
     } catch (Throwable $e) {
         try {
-            remove_all($id);
+            remove_all($id, keepVolume: $keepData);
         } catch (Throwable) {
             // Preserve the original failure while attempting best-effort cleanup.
         }
@@ -226,13 +228,14 @@ if ($route('POST', '/agents/([0-9a-f-]+)/stop')) {
 
 if ($route('DELETE', '/agents/([0-9a-f-]+)')) {
     $id = agent_id($m[1]);
-    remove_all($id);
+    $keepData = ($_GET['keep_data'] ?? '') === 'true';
+    remove_all($id, keepVolume: $keepData);
     $ref = $_GET['secret_ref'] ?? '';
     $keep = ($_GET['keep_secret'] ?? '') === 'true';
     if ($ref !== '' && !$keep) {
         delete_secret($ref);
     }
-    logline("agent $id removed (secret kept=" . ($keep ? 'true' : 'false') . ')');
+    logline("agent $id removed (secret kept=" . ($keep ? 'true' : 'false') . ', data kept=' . ($keepData ? 'true' : 'false') . ')');
     out(['deleted' => true]);
 }
 

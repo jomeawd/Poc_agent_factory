@@ -641,5 +641,65 @@ test('AgentFather offers no model choices when every provider is disconnected', 
     assert_eq('single', $q['kind']);
 });
 
+test('broker keeps the data volume unless asked to drop it', function () {
+    $id = '11111111-1111-4111-8111-111111111111';
+    $deleted = [];
+    $transport = function (string $method, string $path) use (&$deleted): array {
+        if ($method === 'DELETE') {
+            $deleted[] = strtok($path, '?');
+        }
+        return [404, '{"message":"no such"}'];
+    };
+    remove_all($id, $transport, 'af-egress', keepVolume: true);
+    assert_eq(["/containers/af-agent-$id", "/networks/af-net-$id"], $deleted);
+    $deleted = [];
+    remove_all($id, $transport, 'af-egress');
+    assert_eq("/volumes/af-data-$id", end($deleted));
+});
+
+test('Off/On and re-creating an agent that ran keep its data; a failed first create does not', function () {
+    $aid = '11111111-1111-4111-8111-111111111111';
+    $agent = [
+        'id' => $aid, 'tenant_id' => 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'name' => 'Nova', 'job' => 'support',
+        'instructions' => 'Be helpful.', 'prohibited_tasks' => '[]', 'channel_type' => 'telegram',
+        'secret_ref' => 'sec_' . str_repeat('a', 32), 'runtime' => 'openclaw', 'model' => 'claude-haiku-5-5', 'allowed_users' => '[]',
+    ];
+    $ranBefore = false;
+    set_pdo(new MockPdo(function (string $sql) use ($agent, &$ranBefore): array {
+        if (str_starts_with($sql, 'SELECT * FROM agents WHERE id=?')) {
+            return ['rows' => [$agent]];
+        }
+        if (str_starts_with($sql, "SELECT 1 FROM events WHERE agent_id=? AND type='start_and_health_check'")) {
+            return ['rows' => $ranBefore ? [['?column?' => 1]] : []];
+        }
+        if (str_starts_with($sql, 'SELECT current_step')) {
+            return ['rows' => [['current_step' => 'start_and_health_check']]];
+        }
+        return ['rows' => []];
+    }));
+    $seen = [];
+    set_broker_handler(function (string $method, string $path, ?array $json, array $query) use (&$seen): array {
+        if (str_ends_with($path, '/start')) {
+            throw new StepError('Agent runtime exited during start', 500);  // force a rollback
+        }
+        $seen["$method " . (str_ends_with($path, '/create') ? 'create' : (str_ends_with($path, '/pull') ? 'pull' : 'delete'))] = $query['keep_data'] ?? 'no';
+        return ['container_id' => 'c1'];
+    });
+    $job = fn(string $type) => ['id' => '22222222-2222-4222-8222-222222222222', 'agent_id' => $aid, 'type' => $type];
+
+    run_job($job('enable'));                       // Off -> On
+    assert_eq(['true', 'true'], [$seen['POST create'], $seen['DELETE delete']]);
+
+    $seen = [];
+    run_job($job('create'));                       // first create that never ran: data may go
+    assert_eq(['no', 'no'], [$seen['POST create'], $seen['DELETE delete']]);
+
+    $seen = [];
+    $ranBefore = true;
+    run_job($job('create'));                       // re-create after a failure, agent had run before
+    assert_eq(['true', 'true'], [$seen['POST create'], $seen['DELETE delete']]);
+    set_broker_handler(null);
+});
+
 echo "\nSummary: $passed passed, $failed failed\n";
 exit($failed > 0 ? 1 : 0);

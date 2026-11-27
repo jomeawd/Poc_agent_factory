@@ -151,10 +151,12 @@ function names(string $id): array
 }
 
 /**
- * Idempotently removes container, network, and volume for an agent.
+ * Idempotently removes container, network, and (unless $keepVolume) volume for an agent.
+ * The volume holds the agent's sessions and memory: it is kept across Off/On and re-creation,
+ * and only goes on an explicit delete or when a first creation fails.
  * Fails loudly if Docker returns an unexpected error so cleanup never reports false success.
  */
-function remove_all(string $id, ?callable $transport = null, ?string $egressContainer = null): void
+function remove_all(string $id, ?callable $transport = null, ?string $egressContainer = null, bool $keepVolume = false): void
 {
     [$c, $v, $n] = names($id);
     $egress = $egressContainer ?? (getenv('EGRESS_CONTAINER') ?: 'af-egress');
@@ -185,6 +187,9 @@ function remove_all(string $id, ?callable $transport = null, ?string $egressCont
     [$code, $res] = docker('DELETE', "/networks/$n", null, 'application/json', 60, $transport);
     $assertGone('DELETE', "/networks/$n", $code, $res);
 
+    if ($keepVolume) {
+        return;
+    }
     [$code, $res] = docker('DELETE', "/volumes/$v?force=true", null, 'application/json', 60, $transport);
     $assertGone('DELETE', "/volumes/$v", $code, $res);
 }

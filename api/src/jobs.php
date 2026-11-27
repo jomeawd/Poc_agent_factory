@@ -109,6 +109,22 @@ function manifest(array $a): array
     ];
 }
 
+/**
+ * Whether a job must keep the agent's data volume (sessions, memory) when it (re)creates the
+ * container or rolls back. Only a first creation that never got the agent running may drop it;
+ * Off/On and re-creating an agent that already ran always keep it.
+ */
+function keeps_agent_data(string $jobType, string $agentId): bool
+{
+    if ($jobType === 'enable') {
+        return true;
+    }
+    return q1(
+        "SELECT 1 FROM events WHERE agent_id=? AND type='start_and_health_check' AND state='completed' LIMIT 1",
+        $agentId
+    ) !== null;
+}
+
 function set_agent(string $id, array $fields): void
 {
     $cols = implode(', ', array_map(fn($k) => "$k=?", array_keys($fields)));
@@ -153,8 +169,12 @@ function recover_interrupted_jobs(bool $startup = false): int
     foreach (q($rbSql) as $j) {
         $a = q1('SELECT * FROM agents WHERE id=?', $j['agent_id']);
         if ($a) {
+            $query = ['secret_ref' => $a['secret_ref'] ?? '', 'keep_secret' => 'true'];
+            if (keeps_agent_data($j['type'], $a['id'])) {
+                $query['keep_data'] = 'true';
+            }
             try {
-                broker('DELETE', "/agents/{$a['id']}", null, ['secret_ref' => $a['secret_ref'] ?? '', 'keep_secret' => 'true']);
+                broker('DELETE', "/agents/{$a['id']}", null, $query);
             } catch (StepError) {
                 // Cleanup will run again on retry.
             }
@@ -201,6 +221,10 @@ function run_job(array $job): void
         return $res;
     };
 
+    // Decided before the job runs: its own health check must not turn a first create into a "re-create".
+    $keepData = in_array($job['type'], ['create', 'enable'], true) && keeps_agent_data($job['type'], $aid);
+    $dataQuery = $keepData ? ['keep_data' => 'true'] : [];
+
     try {
         switch ($job['type']) {
             case 'create':
@@ -216,7 +240,7 @@ function run_job(array $job): void
                     fn() => broker('POST', "/images/{$a['runtime']}/pull", null, [], BROKER_PULL_TIMEOUT),
                     BROKER_PULL_TIMEOUT
                 );
-                $res = $step('create_container', fn() => broker('POST', "/agents/$aid/create", manifest($a)));
+                $res = $step('create_container', fn() => broker('POST', "/agents/$aid/create", manifest($a), $dataQuery));
                 set_agent($aid, ['container_id' => $res['container_id']]);
                 $step('start_and_health_check', fn() => broker('POST', "/agents/$aid/start"));
                 set_agent($aid, ['state' => 'active', 'state_reason' => null]);
@@ -241,7 +265,7 @@ function run_job(array $job): void
         if (in_array($job['type'], ['create', 'enable'], true)) {
             q("UPDATE jobs SET state='rolling_back', lease_expires_at = now() + interval '180 seconds', updated_at=now() WHERE id=?", $jid);
             try {
-                broker('DELETE', "/agents/$aid", null, ['secret_ref' => $a['secret_ref'] ?? '', 'keep_secret' => 'true']);
+                broker('DELETE', "/agents/$aid", null, ['secret_ref' => $a['secret_ref'] ?? '', 'keep_secret' => 'true'] + $dataQuery);
                 event($tenant, $aid, 'rollback', 'completed', null, $jid);
             } catch (StepError $e2) {
                 event($tenant, $aid, 'rollback', 'failed', $e2->getMessage() . ' (cleanup will run on retry)', $jid);
