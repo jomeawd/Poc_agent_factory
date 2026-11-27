@@ -114,22 +114,32 @@ function db_init(): void
             sleep(1);
         }
     }
-    pdo()->exec(SCHEMA);
     $email = strtolower(getenv('OWNER_EMAIL') ?: 'owner@acme.test');
     $password = getenv('OWNER_PASSWORD');
     if (!is_string($password) || $password === '') {
         throw new RuntimeException('OWNER_PASSWORD must be configured');
     }
-    if (!q1('SELECT 1 FROM users WHERE email=?', $email)) {
-        q(
-            "INSERT INTO users(id, tenant_id, email, password_hash, role) VALUES (?,?,?,?,'owner') ON CONFLICT DO NOTHING",
-            uuid4(),
-            uuid4(),
-            $email,
-            password_hash($password, PASSWORD_DEFAULT)
-        );
+    // The API's PHP workers and the job worker all run this on cold start. Concurrent
+    // CREATE TABLE IF NOT EXISTS can still collide in the Postgres catalog, so serialize it.
+    pdo()->exec('SELECT pg_advisory_lock(' . DB_INIT_LOCK . ')');
+    try {
+        pdo()->exec(SCHEMA);
+        if (!q1('SELECT 1 FROM users WHERE email=?', $email)) {
+            q(
+                "INSERT INTO users(id, tenant_id, email, password_hash, role) VALUES (?,?,?,?,'owner') ON CONFLICT DO NOTHING",
+                uuid4(),
+                uuid4(),
+                $email,
+                password_hash($password, PASSWORD_DEFAULT)
+            );
+        }
+    } finally {
+        pdo()->exec('SELECT pg_advisory_unlock(' . DB_INIT_LOCK . ')');
     }
 }
+
+/** Advisory lock key for schema initialization (arbitrary, unique to this app). */
+const DB_INIT_LOCK = 7_406_221_101;
 
 function event(
     string $tenant,
