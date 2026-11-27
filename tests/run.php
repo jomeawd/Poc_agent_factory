@@ -437,5 +437,60 @@ test('worker restart recovery re-queues interrupted running jobs without failing
     assert_eq(['job_recovered'], $events);
 });
 
+test('create pulls the image in its own step, with a timeout and lease longer than the pull', function () {
+    $aid = '11111111-1111-4111-8111-111111111111';
+    $agent = [
+        'id' => $aid, 'tenant_id' => 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'name' => 'Nova', 'job' => 'support',
+        'instructions' => 'Be helpful.', 'prohibited_tasks' => '[]', 'channel_type' => 'telegram',
+        'secret_ref' => 'sec_' . str_repeat('a', 32), 'runtime' => 'hermes', 'model' => 'claude-haiku-5-5', 'allowed_users' => '[]',
+    ];
+    $leases = [];
+    set_pdo(new MockPdo(function (string $sql, array $params) use ($agent, &$leases): array {
+        if (str_starts_with($sql, 'SELECT * FROM agents WHERE id=?')) {
+            return ['rows' => [$agent]];
+        }
+        if (str_starts_with($sql, 'UPDATE jobs SET current_step=?')) {
+            $leases[$params[0]] = $params[1];
+        }
+        return ['rows' => []];
+    }));
+    $calls = [];
+    set_broker_handler(function (string $method, string $path, ?array $json, array $query, int $timeout) use (&$calls): array {
+        $calls[] = "$method $path $timeout";
+        return str_ends_with($path, '/create') ? ['container_id' => 'c1'] : [];
+    });
+    run_job(['id' => '22222222-2222-4222-8222-222222222222', 'agent_id' => $aid, 'type' => 'create']);
+    set_broker_handler(null);
+
+    assert_eq([
+        'POST /images/hermes/pull ' . BROKER_PULL_TIMEOUT,
+        "POST /agents/$aid/create " . BROKER_TIMEOUT,
+        "POST /agents/$aid/start " . BROKER_TIMEOUT,
+    ], $calls);
+    // The API outwaits the broker's Docker pull, and the lease outlives the API's wait.
+    assert_true(BROKER_PULL_TIMEOUT > IMAGE_PULL_TIMEOUT, 'API must wait longer than the broker pull');
+    assert_true($leases['pull_image'] > BROKER_PULL_TIMEOUT, 'pull lease must outlive the pull call');
+    assert_true($leases['create_container'] > BROKER_TIMEOUT, 'create lease must outlive the create call');
+});
+
+test('broker pulls a missing pinned image once and never pulls an existing one', function () {
+    $image = 'nousresearch/hermes-agent:v1@sha256:' . str_repeat('a', 64);
+    $calls = [];
+    $present = false;
+    $transport = function (string $method, string $path, mixed $body, string $ct, int $timeout) use (&$calls, &$present): array {
+        $calls[] = "$method " . strtok($path, '?') . " $timeout";
+        if ($method === 'GET') {
+            return $present ? [200, '{}'] : [404, '{"message":"no such image"}'];
+        }
+        $present = true;
+        return [200, '{}'];
+    };
+    assert_eq(true, ensure_image($image, $transport));
+    assert_eq(['GET /images/' . rawurlencode($image) . '/json 30', 'POST /images/create ' . IMAGE_PULL_TIMEOUT], $calls);
+    $calls = [];
+    assert_eq(false, ensure_image($image, $transport));
+    assert_eq(1, count($calls));
+});
+
 echo "\nSummary: $passed passed, $failed failed\n";
 exit($failed > 0 ? 1 : 0);

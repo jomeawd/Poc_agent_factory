@@ -659,13 +659,47 @@ function model_env(array $model, string $runtime, string $secretsDir = SECRETS_D
     return "$var={$c['value']}";
 }
 
+/** Pinned image (repo:tag@digest) for a runtime. */
+function runtime_image(string $runtime): string
+{
+    $image = match ($runtime) {
+        'hermes' => getenv('HERMES_IMAGE'),
+        'openclaw' => getenv('OPENCLAW_IMAGE'),
+        default => fail(422, 'manifest: runtime not allowed'),
+    };
+    if (!is_string($image) || !str_contains($image, '@')) {
+        throw new RuntimeException("Image for runtime $runtime is not pinned");
+    }
+    return $image;
+}
+
+/** Pull timeout for runtime images (several GB on a cold host). The API waits a bit longer. */
+const IMAGE_PULL_TIMEOUT = 600;
+
+/**
+ * Pulls the runtime image if it is not on the host yet. Separate from container creation so a
+ * slow first pull never races the API's timeout and rollback (create no longer pulls).
+ *
+ * @return bool true if the image had to be pulled
+ */
+function ensure_image(string $image, ?callable $transport = null): bool
+{
+    if (docker('GET', '/images/' . rawurlencode($image) . '/json', null, 'application/json', 30, $transport)[0] !== 404) {
+        return false;
+    }
+    [$repo, $digest] = explode('@', $image, 2);
+    $q = http_build_query(['fromImage' => strtok($repo, ':'), 'tag' => $digest]);
+    docker_ok('POST', "/images/create?$q", null, 'application/json', IMAGE_PULL_TIMEOUT, $transport);
+    return true;
+}
+
 function runtime_spec(array $m, string $vname): array
 {
     $model = model_spec($m['model']);
     $modelEnv = model_env($model, $m['runtime']);
     if ($m['runtime'] === 'hermes') {
         return [
-            'image' => getenv('HERMES_IMAGE'), 'uid' => 10000, 'dir' => '/opt/data',
+            'image' => runtime_image('hermes'), 'uid' => 10000, 'dir' => '/opt/data',
             'env' => [
                 $modelEnv,
                 'HERMES_GATEWAY_NO_SUPERVISE=1',
@@ -678,7 +712,7 @@ function runtime_spec(array $m, string $vname): array
         ];
     }
     return [
-        'image' => getenv('OPENCLAW_IMAGE'), 'uid' => 1000, 'dir' => STATE_DIR,
+        'image' => runtime_image('openclaw'), 'uid' => 1000, 'dir' => STATE_DIR,
         'env' => [
             $modelEnv,
             'OPENCLAW_GATEWAY_TOKEN=' . bin2hex(random_bytes(24)),

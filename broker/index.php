@@ -111,6 +111,15 @@ if ($route('DELETE', '/secrets/(sec_[a-f0-9]{32})')) {
     out(['deleted' => true]);
 }
 
+if ($route('POST', '/images/([a-z]+)/pull')) {
+    $image = runtime_image($m[1]);
+    $pulled = ensure_image($image);
+    if ($pulled) {
+        logline("pulled runtime image for {$m[1]}");
+    }
+    out(['pulled' => $pulled]);
+}
+
 if ($route('POST', '/agents/([0-9a-f-]+)/create')) {
     $id = agent_id($m[1]);
     $man = validate_manifest(body(), $id);
@@ -121,15 +130,17 @@ if ($route('POST', '/agents/([0-9a-f-]+)/create')) {
     $egress = getenv('EGRESS_CONTAINER');
     $labels = ['af.managed' => 'true', 'af.agent_id' => $id];
 
+    // The image is pulled by its own step (POST /images/{runtime}/pull). Creating never pulls,
+    // so this request stays short and cannot outlive the API's timeout and rollback.
+    if (docker('GET', '/images/' . rawurlencode($image) . '/json', null, 'application/json', 30)[0] === 404) {
+        fail(409, 'Runtime image is not on the host yet; retry the deployment.');
+    }
+
     // Idempotent: whatever a previous (possibly interrupted) attempt left is removed,
     // so a retry can never produce a second container for this agent.
     remove_all($id);
 
     try {
-        if (docker('GET', '/images/' . rawurlencode($image) . '/json')[0] === 404) {
-            [$repo, $digest] = explode('@', $image);
-            docker_ok('POST', '/images/create?' . http_build_query(['fromImage' => strtok($repo, ':'), 'tag' => $digest]), null, 'application/json', 600);
-        }
         docker_ok('POST', '/networks/create', ['Name' => $nname, 'Driver' => 'bridge', 'Internal' => true, 'Labels' => $labels + ['af.egress' => $egress]]);
         docker_ok('POST', "/networks/$nname/connect", ['Container' => $egress]);
         docker_ok('POST', '/volumes/create', ['Name' => $vname, 'Labels' => $labels]);

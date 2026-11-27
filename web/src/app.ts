@@ -288,11 +288,12 @@ const STATE_LABEL: Record<AgentState, string> = {
 };
 const STEP_LABEL: Record<string, string> = {
   validate_config: 'Validate configuration',
+  pull_image: 'Download runtime (first time only)',
   create_container: 'Create isolated container',
   start_and_health_check: 'Start runtime and health check',
   rollback: 'Clean up after failure',
 };
-const DEPLOY_STEPS = ['validate_config', 'create_container', 'start_and_health_check'];
+const DEPLOY_STEPS = ['validate_config', 'pull_image', 'create_container', 'start_and_health_check'];
 
 let agents: Agent[] = [];
 let side: Side | null = null;

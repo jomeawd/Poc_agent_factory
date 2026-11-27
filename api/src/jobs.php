@@ -21,12 +21,19 @@ function broker_handler(?callable $override = null, bool $replace = false): ?cal
     return $handler;
 }
 
+/** Default wait for a broker call; covers create plus the 120 s health check of start. */
+const BROKER_TIMEOUT = 150;
+/** Image pulls: the broker gives Docker 600 s, the API waits a bit longer so it never gives up first. */
+const BROKER_PULL_TIMEOUT = 660;
+/** A job's lease must outlast the broker call of its current step, or recovery would re-run it. */
+const STEP_LEASE_MARGIN = 60;
+
 /** Calls the Deployment Broker. Errors become StepError with a safe message (never a secret). */
-function broker(string $method, string $path, ?array $json = null, array $query = []): array
+function broker(string $method, string $path, ?array $json = null, array $query = [], int $timeout = BROKER_TIMEOUT): array
 {
     $custom = broker_handler();
     if ($custom !== null) {
-        return $custom($method, $path, $json, $query);
+        return $custom($method, $path, $json, $query, $timeout);
     }
 
     $url = rtrim((string)getenv('BROKER_URL'), '/') . $path . ($query ? '?' . http_build_query($query) : '');
@@ -35,7 +42,7 @@ function broker(string $method, string $path, ?array $json = null, array $query 
     $opts = [
         CURLOPT_CUSTOMREQUEST => $method,
         CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT => 150,
+        CURLOPT_TIMEOUT => $timeout,
         CURLOPT_CONNECTTIMEOUT => 5,
     ];
     if ($json !== null) {
@@ -176,10 +183,11 @@ function run_job(array $job): void
     $jid = $job['id'];
     $aid = $a['id'];
 
-    $step = function (string $name, callable $fn) use ($tenant, $aid, $jid) {
+    $step = function (string $name, callable $fn, int $timeout = BROKER_TIMEOUT) use ($tenant, $aid, $jid) {
         q(
-            "UPDATE jobs SET current_step=?, lease_expires_at = now() + interval '180 seconds', updated_at=now() WHERE id=?",
+            "UPDATE jobs SET current_step=?, lease_expires_at = now() + (? * interval '1 second'), updated_at=now() WHERE id=?",
             $name,
+            $timeout + STEP_LEASE_MARGIN,
             $jid
         );
         $t0 = microtime(true);
@@ -203,6 +211,11 @@ function run_job(array $job): void
                         throw new StepError('WhatsApp is not available in this POC (OpenClaw only supports WhatsApp Web linking). See README.');
                     }
                 });
+                $step(
+                    'pull_image',
+                    fn() => broker('POST', "/images/{$a['runtime']}/pull", null, [], BROKER_PULL_TIMEOUT),
+                    BROKER_PULL_TIMEOUT
+                );
                 $res = $step('create_container', fn() => broker('POST', "/agents/$aid/create", manifest($a)));
                 set_agent($aid, ['container_id' => $res['container_id']]);
                 $step('start_and_health_check', fn() => broker('POST', "/agents/$aid/start"));
